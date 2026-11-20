@@ -281,6 +281,9 @@ ON CONFLICT (name) DO NOTHING`,
 	if err := d.seedDefaultInterceptRulesV3(); err != nil {
 		return fmt.Errorf("seed intercept rules v3: %w", err)
 	}
+	if err := d.seedDefaultInterceptRulesV4(); err != nil {
+		return fmt.Errorf("seed intercept rules v4: %w", err)
+	}
 	if err := d.seedDefaultAssetInterceptRules(); err != nil {
 		return fmt.Errorf("seed asset intercept rules: %w", err)
 	}
@@ -597,8 +600,21 @@ ON CONFLICT DO NOTHING`,
 // /delete-user do. destroy is re-covered here because v1's rule does not allow a
 // suffix (/destroyAll was missed).
 //
+// It also requires the verb to sit inside a URL path (https?://host/.../delete),
+// so only a request that actually targets a delete endpoint is blocked. A bare
+// string that merely mentions a delete path — e.g. `python3` reading an OpenAPI
+// spec that lists `/twpaa/delete_user` — no longer trips the rule, because the
+// [^\s"'] run cannot bridge the quote/space that separates a base URL from a
+// path literal. Trade-off: a soft-delete expressed only in a POST body
+// (`-d '{"op":"delete"}'`) is not caught; the verb must appear in the URL.
+//
 // Exported as a package const only so the seeded regex is unit-testable without a DB.
-const deleteEndpointPathPattern = `(?i)/(?:(?:delete|remove|unlink|erase|destroy)[-\w]*|del)(?:[/?#"'\s]|$)`
+const deleteEndpointPathPattern = `(?i)https?://[^\s"']*/(?:(?:delete|remove|unlink|erase|destroy)[-\w]*|del)(?:[/?#"'\s]|$)`
+
+// deleteEndpointPathPatternLegacy is the pre-v4 pattern that matched the verb
+// anywhere in tool_input (no URL context), which over-blocked spec reads. V4
+// migrates rows still carrying it to deleteEndpointPathPattern.
+const deleteEndpointPathPatternLegacy = `(?i)/(?:(?:delete|remove|unlink|erase|destroy)[-\w]*|del)(?:[/?#"'\s]|$)`
 
 func (d *DB) seedDefaultInterceptRulesV3() error {
 	if v, _, _ := d.GetSetting("intercept_default_rules_v3"); v == "done" {
@@ -616,4 +632,31 @@ WHERE NOT EXISTS (SELECT 1 FROM intercept_rules WHERE name = $1)`,
 		return fmt.Errorf("rule %q: %w", name, err)
 	}
 	return d.SetSetting("intercept_default_rules_v3", "done")
+}
+
+// seedDefaultInterceptRulesV4 relaxes the delete-endpoint rule so it only fires
+// when the delete verb sits inside a request URL, not whenever the string appears
+// anywhere in the command. The v3 pattern over-blocked read-only work — e.g.
+// `python3` printing an OpenAPI spec whose paths include /twpaa/delete_user — which
+// never sends a delete. Own flag so it also lands on DBs that already ran v3.
+//
+// The UPDATE is guarded by pattern = legacy, so a rule the user has since edited by
+// hand (different pattern) is left untouched; only the untouched built-in migrates.
+func (d *DB) seedDefaultInterceptRulesV4() error {
+	if v, _, _ := d.GetSetting("intercept_default_rules_v4"); v == "done" {
+		return nil
+	}
+	const name = "[内置] 删除类接口路径"
+	if _, err := d.Exec(`
+UPDATE intercept_rules
+   SET pattern = $2, message = $3
+ WHERE name = $1 AND pattern = $4`,
+		name,
+		deleteEndpointPathPattern,
+		"禁止调用删除类接口（/delete /remove /unlink /erase 等）——仅当删除动词出现在请求 URL 路径中时拦截，不论使用哪种 HTTP 方法；仅在命令/脚本里提及删除路径（如读取接口规格）不再误拦",
+		deleteEndpointPathPatternLegacy,
+	); err != nil {
+		return fmt.Errorf("rule %q: %w", name, err)
+	}
+	return d.SetSetting("intercept_default_rules_v4", "done")
 }
