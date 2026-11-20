@@ -28,7 +28,8 @@ func TestDeleteEndpointPathPattern(t *testing.T) {
 		}
 	}
 
-	// 动词后必须跟分隔符，避免 /delivery、/details 这类只读路径被误拦。
+	// 动词后必须跟分隔符，避免 /delivery、/details 这类只读路径被误拦；且删除动词
+	// 必须出现在请求 URL 路径里，只在命令/脚本里提及删除路径（如读取接口规格）不拦。
 	miss := []string{
 		`{"command":"curl 'http://t.com/api/delivery?id=1'"}`,
 		`{"command":"curl 'http://t.com/order/details'"}`,
@@ -37,6 +38,13 @@ func TestDeleteEndpointPathPattern(t *testing.T) {
 		`{"command":"curl 'http://delete.example.com/'"}`, // 删除动词出现在域名而非路径
 		`{"command":"curl 'http://t.com/remote/status'"}`,
 		`{"command":"nmap -p80 10.0.0.1"}`,
+		// 以下是 v4 放宽后不再误拦的只读场景：仅在本地读取/打印含删除路径的字符串，
+		// 从不真正发起删除请求。删除动词没有紧贴在 http(s):// URL 之后。
+		`{"command":"python3 -c \"import json; d=json.load(open('openapi.json'))\nfor p in ['/twpaa/echo','/twpaa/delete_user','/user/private/profile']:\n print(p)\""}`,
+		`{"command":"grep -n '/delete' routes.txt"}`,
+		`{"command":"echo 'paths: /api/delete-user /api/remove'"}`,
+		// base URL 与删除路径分处两个带引号的 token，[^\\s\"'] 跨不过引号，不会拼接误拦。
+		`{"command":"python3 - <<'PY'\nbase='https://t.com/'\nfor p in ['/twpaa/delete_user']:\n    print(base, p)\nPY"}`,
 	}
 	for _, s := range miss {
 		if re.MatchString(s) {
